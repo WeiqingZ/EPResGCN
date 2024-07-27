@@ -1,8 +1,7 @@
 import torch
 import torch.nn as nn
 from torch_geometric.nn import GCNConv, GraphNorm
-from net.block import Encoder, TransBlock, DeeperMeshGcn, DeeperMeshGcnNoEdge, gatv2, GATv1, cgc, PdnBLOCK, Generalblock
-from net.graph_u_net import GraphUnet
+from net.block import Encoder, EPResGCN
 
 
 class Decoder(nn.Module):
@@ -28,7 +27,7 @@ class DnnCfD(nn.Module):
         self.point_encoder = Encoder(args.p_i, args.p_h, args.p_e)
         self.edges_encoder = nn.Linear(args.o_edge_dim, args.edge_dim)
 
-        self.transformer_encoder = DeeperMeshGcnNoEdge(args.p_e, args.edge_dim, args.num_layers)
+        self.transformer_encoder = EPResGCN(args.p_e, args.edge_dim, args.num_layers)
 
         self.decoder = Decoder(args)
 
