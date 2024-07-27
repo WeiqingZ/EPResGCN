@@ -123,8 +123,6 @@ class DlCfd(object):
             print('Use CPU')
         return device
 
-
-
     def _build_model(self):
         model = DnnCfD(self.args).float()
         if self.args.use_multi_gpu and self.args.use_gpu:
@@ -159,24 +157,18 @@ class DlCfd(object):
                 attr = point_data.edge_attr
                 e_type = point_data.e_type
                 attr = torch.cat((attr, e_type), dim=1)
-                data_mean = point_data.y_mean.detach().cpu().numpy()[0:2]
-                data_std = point_data.y_std.detach().cpu().numpy()[0:2]
 
                 batch = point_data.batch
                 time_condition = point_data.time
                 pre_data = self.net(points, conditions, index, attr, batch, time_condition)
                 true = point_data.y.detach().cpu().numpy()
                 pre_data = pre_data.detach().cpu().numpy()
-
-                true = true * data_std + data_mean
-                pre_data = pre_data * data_std + data_mean
                 preds.append(pre_data)
                 trues.append(true)
         preds = np.concatenate([arr for arr in preds], axis=0)
         trues = np.concatenate([arr for arr in trues], axis=0)
         mse, mae, r_squared = metric(preds, trues)
         per_u, per_p, per_all = cul_percentage(preds, trues)
-        print(mse, mae, r_squared)
         return mse, mae, r_squared, per_u, per_p, per_all
 
     def train(self, setting):
@@ -191,7 +183,6 @@ class DlCfd(object):
         model_optim = optim.Adam([{'params': self.net.parameters()}, {'params': auto_loss.parameters()}],
                                  lr=self.args.learning_rate)
         scheduler = torch.optim.lr_scheduler.MultiStepLR(model_optim, milestones, gamma=0.5)
-        results = []
         for epoch in range(self.args.train_epochs):
             preds = []
             trues = []
