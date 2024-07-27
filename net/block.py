@@ -1,6 +1,6 @@
 import torch
 import torch.nn as nn
-from torch_geometric.nn import TransformerConv, MessagePassing, GraphNorm, CGConv, GENConv, GATv2Conv, GATConv, PDNConv, GeneralConv
+from torch_geometric.nn import GraphNorm
 
 from typing import List, Optional, Tuple, Union
 
@@ -27,6 +27,59 @@ from torch_geometric.typing import (
     SparseTensor,
 )
 from torch_geometric.utils import is_torch_sparse_tensor, to_edge_index
+
+
+class Encoder(nn.Module):
+    def __init__(self, in_size, hidden_size,  out_size):
+        super().__init__()
+        self.fc1 = nn.Linear(in_size, hidden_size)
+        self.relu = nn.ReLU()
+        self.bn1 = GraphNorm(hidden_size)
+        self.fc2 = nn.Linear(hidden_size, out_size)
+
+    def forward(self, data, batch):
+        condition = self.relu(self.bn1(self.fc1(data), batch))
+        return self.fc2(condition)
+
+
+class EPResGCNBlock(nn.Module):
+    def __init__(self, p_d, e_d):
+        super().__init__()
+        self.passing = nn.Linear(p_d, e_d)
+        self.conv = gcnblock(p_d, p_d, aggr='softmax', t=1.0, edge_dim=e_d, learn_t=True, num_layers=2, norm='layer')
+        self.gn = GraphNorm(p_d)
+        self.act = nn.LeakyReLU()
+        self.bn = nn.BatchNorm1d(e_d)
+
+    def forward(self, x, edge_index, edge_attr, batch):
+        h = x
+        attr = edge_attr
+        h = self.act(self.gn(h, batch))
+        attr = self.act(self.bn(attr))
+        attr = self.passing(attr)
+
+        h = self.conv(h, edge_index, attr)
+
+        return h + x, attr + edge_attr
+
+
+class EPResGCN(nn.Module):
+    def __init__(self, p_d, e_d, num_layers):
+        super().__init__()
+        self.layers = torch.nn.ModuleList()
+        for i in range(0, num_layers):
+            layer = EPResGCNBlock(p_d, e_d)
+            self.layers.append(layer)
+
+    def forward(self, x, edge_index, edge_attr, batch):
+        edge_attr = self.layers[0].passing(edge_attr)
+        x = self.layers[0].conv(x, edge_index, edge_attr)
+
+        for layer in self.layers[1:]:
+            x, edge_attr = layer(x, edge_index, edge_attr, batch)
+
+        x = self.layers[0].act(self.layers[0].gn(x, batch))
+        return x
 
 
 class MLP(Sequential):
@@ -188,232 +241,6 @@ class gcnblock(MessagePassing):
 
 
 
-class Encoder(nn.Module):
-    def __init__(self, in_size, hidden_size,  out_size):
-        super().__init__()
-        self.fc1 = nn.Linear(in_size, hidden_size)
-        self.relu = nn.ReLU()
-        self.bn1 = GraphNorm(hidden_size)
-        self.fc2 = nn.Linear(hidden_size, out_size)
 
-    def forward(self, data, batch):
-        condition = self.relu(self.bn1(self.fc1(data), batch))
-        return self.fc2(condition)
-
-
-class EdgesPointsEncoder(MessagePassing):
-    def __init__(self, p_channel, e_channel):
-        super().__init__(aggr='mean')
-        self.fc1 = nn.Linear(p_channel, e_channel)
-        self.fc2 = nn.Linear(p_channel, e_channel)
-        self.fc3 = nn.Linear(e_channel, e_channel)
-        self.bn1 = nn.BatchNorm1d(e_channel)
-
-        self.relu = nn.LeakyReLU()
-
-    def forward(self, x, edge_index, edge_attr):
-        edge_attr = self.edge_updater(edge_index, x=x, edge_attr=edge_attr)
-
-        return edge_attr
-
-    def edge_update(self, x_j, x_i, edge_attr):
-        edge_attr = self.fc1(x_i) + self.fc2(x_j) + self.fc3(edge_attr)
-        edge_attr = self.relu(self.bn1(edge_attr))
-        return edge_attr
-
-
-class TransBlock(nn.Module):
-    def __init__(self, p_e, p_d, number_layers):
-        super(TransBlock, self).__init__()
-        self.TransGcn1 = TransformerConv(in_channels=p_e, out_channels=p_e,
-                                        heads=8, dropout=0.1,
-                                        concat=False, edge_dim=p_d)
-        self.gn1 = GraphNorm(p_e)
-
-        self.TransGcn2 = TransformerConv(in_channels=p_e, out_channels=p_e,
-                                        heads=8, dropout=0.1,
-                                        concat=False, edge_dim=p_d)
-        self.gn2 = GraphNorm(p_e)
-
-        self.relu = nn.LeakyReLU()
-
-    def forward(self, x, index, attr, batch):
-        x = self.relu(self.gn1(self.TransGcn1(x, index, attr), batch))
-        encoder_out = self.relu(self.gn2(self.TransGcn2(x, index, attr), batch))  # (t_h_s, t_o_s)
-
-        return encoder_out
-
-
-class GATv1(nn.Module):
-    def __init__(self, p_e, p_d, number_layers):
-        super(GATv1, self).__init__()
-        self.gat1 = GATConv(in_channels=p_e, out_channels=p_e,
-                                        heads=8, dropout=0.1,
-                                        concat=False, edge_dim=p_d)
-        self.gn1 = GraphNorm(p_e)
-
-        self.gat2 = GATConv(in_channels=p_e, out_channels=p_e,
-                                        heads=8, dropout=0.1,
-                                        concat=False, edge_dim=p_d)
-        self.gn2 = GraphNorm(p_e)
-        self.relu = nn.LeakyReLU()
-
-    def forward(self, x, index, attr, batch):
-        x = self.relu(self.gn1(self.gat1(x, index, attr), batch))
-        encoder_out = self.relu(self.gn2(self.gat2(x, index, attr), batch))  # (t_h_s, t_o_s)
-
-        return encoder_out
-
-
-class cgc(nn.Module):
-    def __init__(self, p_e, p_d, number_layers):
-        super(cgc, self).__init__()
-        self.cgc1 = CGConv(channels=p_e, dim=p_d)
-        self.gn1 = GraphNorm(p_e)
-
-        self.cgc2 = CGConv(channels=p_e, dim=p_d)
-        self.gn2 = GraphNorm(p_e)
-        self.relu = nn.LeakyReLU()
-
-    def forward(self, x, index, attr, batch):
-        x = self.relu(self.gn1(self.cgc1(x, index, attr), batch))
-        x = self.relu(self.gn2(self.cgc2(x, index, attr), batch))  # (t_h_s, t_o_s)
-
-        return x
-
-class PdnBLOCK(nn.Module):
-    def __init__(self, p_e, p_d, number_layers):
-        super(PdnBLOCK, self).__init__()
-
-        self.convs = nn.ModuleList()
-        self.batch_norms = nn.ModuleList()
-        for _ in range(2):
-            conv = GeneralConv(in_channels=p_e, out_channels=p_e, in_edge_channels=p_d)
-            self.convs.append(conv)
-            self.batch_norms.append(GraphNorm(p_e))
-
-        self.relu = nn.LeakyReLU()
-
-    def forward(self, x, index, attr, batch):
-        for conv, batch_norm in zip(self.convs, self.batch_norms):
-            x = self.relu(batch_norm(conv(x, index, attr), batch))
-
-        return x
-
-
-class Generalblock(nn.Module):
-    def __init__(self, p_e, p_d, number_layers):
-        super(Generalblock, self).__init__()
-
-        self.convs = nn.ModuleList()
-        self.batch_norms = nn.ModuleList()
-        for _ in range(2):
-            conv = PDNConv(in_channels=p_e, out_channels=p_e, edge_dim=p_d, hidden_channels=p_d)
-            self.convs.append(conv)
-            self.batch_norms.append(GraphNorm(p_e))
-
-        self.relu = nn.LeakyReLU()
-
-    def forward(self, x, index, attr, batch):
-        for conv, batch_norm in zip(self.convs, self.batch_norms):
-            x = self.relu(batch_norm(conv(x, index, attr), batch))
-
-        return x
-
-
-class gatv2(nn.Module):
-    def __init__(self, p_e, p_d, number_layers):
-        super(gatv2, self).__init__()
-        self.gat1 = GATv2Conv(in_channels=p_e, out_channels=p_e,
-                                        heads=8, dropout=0.1,
-                                        concat=False, edge_dim=p_d)
-        self.gn1 = GraphNorm(p_e)
-
-        self.gat2 = GATv2Conv(in_channels=p_e, out_channels=p_e,
-                                        heads=8, dropout=0.1,
-                                        concat=False, edge_dim=p_d)
-        self.gn2 = GraphNorm(p_e)
-
-        self.relu = nn.LeakyReLU()
-
-    def forward(self, x, index, attr, batch):
-        x = self.relu(self.gn1(self.gat1(x, index, attr), batch))
-        encoder_out = self.relu(self.gn2(self.gat2(x, index, attr), batch))  # (t_h_s, t_o_s)
-
-        return encoder_out
-
-
-class DeepMeshGcnLayer(nn.Module):
-    def __init__(self, p_d, e_d):
-        super().__init__()
-        self.passing = nn.Linear(p_d, e_d)
-        self.conv = gcnblock(p_d, p_d, aggr='softmax', t=1.0, edge_dim=e_d, learn_t=True, num_layers=2, norm='layer')
-        self.gn = GraphNorm(p_d)
-        self.act = nn.LeakyReLU()
-        self.bn = nn.BatchNorm1d(e_d)
-
-    def forward(self, x, edge_index, edge_attr, batch):
-        h = x
-        attr = edge_attr
-        h = self.act(self.gn(h, batch))
-        attr = self.act(self.bn(attr))
-        attr = self.passing(attr)
-
-        h = self.conv(h, edge_index, attr)
-
-        return h + x, attr + edge_attr
-
-
-class DeeperMeshGcn(nn.Module):
-    def __init__(self, p_d, e_d, num_layers):
-        super().__init__()
-        self.layers = torch.nn.ModuleList()
-        for i in range(0, num_layers):
-            layer = DeepMeshGcnLayer(p_d, e_d)
-            self.layers.append(layer)
-
-    def forward(self, x, edge_index, edge_attr, batch):
-        edge_attr = self.layers[0].passing(edge_attr)
-        x = self.layers[0].conv(x, edge_index, edge_attr)
-
-        for layer in self.layers[1:]:
-            x, edge_attr = layer(x, edge_index, edge_attr, batch)
-
-        x = self.layers[0].act(self.layers[0].gn(x, batch))
-        return x
-
-
-class DeepMeshGcnLayerNoEdge(nn.Module):
-    def __init__(self, p_d, e_d):
-        super().__init__()
-        self.conv = gcnblock(p_d, p_d, aggr='softmax', t=1.0, edge_dim=e_d, learn_t=True, num_layers=2, norm='layer')
-        self.gn = GraphNorm(p_d)
-        self.act = nn.LeakyReLU()
-        self.bn = nn.BatchNorm1d(e_d)
-
-    def forward(self, x, edge_index, edge_attr, batch):
-        h = x
-        h = self.act(self.gn(h, batch))
-        h = self.conv(h, edge_index, edge_attr)
-
-        return h + x
-
-
-class DeeperMeshGcnNoEdge(nn.Module):
-    def __init__(self, p_d, e_d, num_layers):
-        super().__init__()
-        self.layers = torch.nn.ModuleList()
-        for i in range(0, num_layers):
-            layer = DeepMeshGcnLayerNoEdge(p_d, e_d)
-            self.layers.append(layer)
-
-    def forward(self, x, edge_index, edge_attr, batch):
-        x = self.layers[0].conv(x, edge_index, edge_attr)
-
-        for layer in self.layers[1:]:
-            x = layer(x, edge_index, edge_attr, batch)
-
-        x = self.layers[0].act(self.layers[0].gn(x, batch))
-        return x
 
 
