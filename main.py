@@ -64,6 +64,5 @@ if __name__ == '__main__':
 
     print('>>>>>>>start training : {}>>>>>>>>>>>>>>>>>>>>>>>>>>'.format(setting))
     net = DlCfd(args)
-    # net.train(setting)
-    net.predict(setting)
+    net.train(setting)
 
